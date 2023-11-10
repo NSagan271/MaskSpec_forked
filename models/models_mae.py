@@ -61,7 +61,7 @@ class AugmentMelSTFT(nn.Module):
 
 
     def forward(self, x):
-
+        print(x)
         x = nn.functional.conv1d(x.unsqueeze(1), self.preemphasis_coefficient).squeeze(1)
         x = torch.stft(x, self.n_fft, hop_length=self.hopsize, win_length=self.win_length,
                        center=True, normalized=False, window=self.window, return_complex=False)
@@ -218,7 +218,7 @@ class MaskedAutoencoderViT(nn.Module):
         
         x = x.reshape(shape=(x.shape[0], h, w, p1, p2, 1))
         x = torch.einsum('nhwpqc->nchpwq', x)
-        imgs = x.reshape(shape=(x.shape[0], 1, h * p1, h * p2))
+        imgs = x.reshape(shape=(x.shape[0], 1, h * p1, w * p2))
         return imgs
 
     def random_masking(self, x, mask_ratio):
@@ -316,7 +316,7 @@ class MaskedAutoencoderViT(nn.Module):
         return loss
 
     def forward(self, imgs, mask_ratio=0.75):
-        imgs = imgs.type(torch.HalfTensor).cuda()
+        imgs = imgs.type(torch.FloatTensor).cuda()
         imgs = self.mel_forward(imgs)
         imgs = imgs[:, :, :self.patch_embed.img_size[0], :self.patch_embed.img_size[1]]
         latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)

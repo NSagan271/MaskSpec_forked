@@ -126,15 +126,15 @@ class VisionTransformer(timm.models.vision_transformer.VisionTransformer):
     def forward(self, x, y, specmix=True, mixup_alpha=0.3, inference=False):
         x, y = self.forward_features(x, y, specmix, mixup_alpha)
         emb = x
-        if self.head_dist is not None:
-            x, x_dist = self.head(x[0]), self.head_dist(x[1])  # x must be a tuple
-            if self.training and not torch.jit.is_scripting():
-                # during inference, return the average of both classifier predictions
-                return x, x_dist
-            else:
-                return (x + x_dist) / 2
-        else:
-            x = self.head(x)
+        # if self.head_dist is not None:
+        #     x, x_dist = self.head(x[0]), self.head_dist(x[1])  # x must be a tuple
+        #     if self.training and not torch.jit.is_scripting():
+        #         # during inference, return the average of both classifier predictions
+        #         return x, x_dist
+        #     else:
+        #         return (x + x_dist) / 2
+        # else:
+        x = self.head(x)
         if inference:
             return x, y, emb
         else:

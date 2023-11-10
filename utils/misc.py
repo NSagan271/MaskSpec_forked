@@ -9,7 +9,7 @@
 # BEiT: https://github.com/microsoft/unilm/tree/master/beit
 # --------------------------------------------------------
 
-import builtins
+# import builtins
 import datetime
 import os
 import time
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-from torch._six import inf
+from torch import inf
 import random
 
 
@@ -172,17 +172,18 @@ def setup_for_distributed(is_master):
     """
     This function disables printing when not in master process
     """
-    builtin_print = builtins.print
+    # builtin_print = builtins.print
 
-    def print(*args, **kwargs):
-        force = kwargs.pop('force', False)
-        force = force or (get_world_size() > 8)
-        if is_master or force:
-            now = datetime.datetime.now().time()
-            builtin_print('[{}] '.format(now), end='')  # print with time stamp
-            builtin_print(*args, **kwargs)
+    # def print(*args, **kwargs):
+    #     force = kwargs.pop('force', False)
+    #     force = force or (get_world_size() > 8)
+    #     if is_master or force:
+    #         now = datetime.datetime.now().time()
+    #         builtin_print('[{}] '.format(now), end='')  # print with time stamp
+    #         builtin_print(*args, **kwargs)
 
-    builtins.print = print
+    # builtins.print = print
+    pass
 
 
 def is_dist_avail_and_initialized():
@@ -215,6 +216,11 @@ def save_on_master(*args, **kwargs):
 
 
 def init_distributed_mode(args):
+    print('Not using distributed mode')
+    setup_for_distributed(is_master=True)  # hack
+    args.distributed = False
+    return
+
     if args.dist_on_itp:
         os.environ['MASTER_ADDR'] = '127.0.0.1'
         os.environ['MASTER_PORT'] = f"{9999 + random.randint(0, 9999)}"  # plz no collisions
