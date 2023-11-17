@@ -7,7 +7,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from scv2.dataset import decode_mp3, pad_or_truncate
 from models.models_mae import AugmentMelSTFT 
 
-def get_mean_std(n_mel=128, sample_number=10000, hopsize=320):
+def get_mean_std(n_mel=128, sample_number=10000, hopsize=15):
     print('Start...')
     hdf5_file = './batlab_audio/data/batlab_data_train_mp3.hdf'
     dataset = h5py.File(hdf5_file, 'r')
@@ -33,17 +33,18 @@ def get_mean_std(n_mel=128, sample_number=10000, hopsize=320):
         mel = Mel(waveform)
         mel = mel.numpy()
         all_mean += mel.mean()
-        all_std += mel.std()
+        all_std += (np.max(mel) - np.min(mel)) / 4 # using the maximum as a proxy for the stdev
+                                       # for this dataset
         frames.append(mel[0])
     dataset.close()
-    all_mean = all_mean / sample_number
+    all_mean = 0#all_mean / sample_number
     all_std = all_std / sample_number
     print('all mean', all_mean)
     print('all std', all_std)
     # frequencies = np.concatenate(frames, 0)
     frames = np.concatenate(frames, 1)
-    frame_mean = np.mean(frames, 1)
-    frame_std = np.std(frames, 1)
+    frame_mean = np.mean(frames, axis=1) * 0
+    frame_std = (np.max(frames, axis=1) - np.min(frames, axis=1)) / 4 # using the maximum as a proxy for the stdev
     print('frame mean', frame_mean)
     print('frame std', frame_std)
     print(frame_mean.shape, frames.shape)

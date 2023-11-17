@@ -1,9 +1,9 @@
-audioread==2.1.9
-augly==0.2.1
-av==8.0.3
-pandas==1.2.3
-timm==0.5.4
-sklearn
+audioread
+augly
+av
+pandas
+timm
+scikit-learn
 librosa
 submitit
 uuid

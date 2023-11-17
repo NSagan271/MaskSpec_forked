@@ -1,4 +1,8 @@
 *.pth
 __pycache__
-env/
+mspec_env/
 data/
+single_mic_data/
+output*/
+log*/
+*.npy

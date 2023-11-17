@@ -4,29 +4,28 @@ from scipy import io, signal
 import argparse
 import numpy as np
 
-source_path = "./batlab_audio/data/"
-out_path = "./batlab_audio/data/mp3_audio/"
+source_path = "./batlab_audio/single_mic_data/"
+out_path = "./batlab_audio/single_mic_data/mp3_audio/"
 
-def process_one(i, seq, seq_num, mic, outdir, FS=32000):
+def process_one(i, chirp, outdir, FS=32000):
     if i % 100 == 0:
         print(i)
     wav = out_path + 'tmp.wav'
-    io.wavfile.write(wav, FS, seq.T[:, mic])
+    io.wavfile.write(wav, FS, chirp)
     
-    os.system(f"ffmpeg  -hide_banner -nostats -loglevel error -n -i {wav} -codec:a mp3 -ar 32000 {outdir}seq_{seq_num}_mic{mic}.mp3")
+    os.system(f"ffmpeg  -hide_banner -nostats -loglevel error -n -i {wav} -codec:a mp3 -ar 32000 {outdir}chirp_{i}.mp3")
 
-def read_all_seqs(dir):
-    seqs = []
+def read_all_chirps(dir):
+    chirps = []
     files = map(lambda filename: source_path + filename, os.listdir(dir))
     for filename in files:
         if '.mat' in filename:
             with h5py.File(filename, 'r') as f:
-                seqs.extend([f[h5py.h5r.get_name(elem, f.id)][:] for elem in f['chirp_sequence_array']])
+                chirps.extend(f['chirp_array'][:])
+    return chirps
 
-    return seqs
-
-def get_sample(seq, mic_idx, upsample_rate=4):
-    x = signal.resample(seq.T[:, mic_idx], seq.T.shape[0] * upsample_rate)
+def get_sample(chirp, upsample_rate=4):
+    x = signal.resample(chirp, len(chirp) * upsample_rate)
     x = x * signal.windows.tukey(len(x))
 
     return x
@@ -52,8 +51,8 @@ if __name__ == '__main__':
     os.makedirs(out_path + 'eval', exist_ok=True)
     os.makedirs(out_path + 'test', exist_ok=True)
 
-    seqs = read_all_seqs(source_path)
-    idxs = np.array(np.meshgrid(np.arange(len(seqs)), np.arange(4))).T.reshape(-1,2)
+    chirps = read_all_chirps(source_path)
+    idxs = np.arange(len(chirps))
     np.random.shuffle(idxs)
     for i, idx in enumerate(idxs):
         out_dir = out_path + 'train/'
@@ -62,7 +61,7 @@ if __name__ == '__main__':
         elif i < idxs.shape[0] * (args.perc_eval + args.perc_test) / 100:
             out_dir = out_path + 'eval/'
         
-        process_one(i, seqs[idx[0]], idx[0], idx[1], out_dir)
+        process_one(i, chirps[idx], out_dir)
         
 
     os.system('stty sane')

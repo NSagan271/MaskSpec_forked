@@ -75,7 +75,7 @@ class MixupDataset(TorchDataset):
 
 
 class BatAudioDataset(TorchDataset):
-    def __init__(self, hdf5_file, sample_rate=32000, clip_length=10, augment=False, in_mem=False, extra_augment=False):
+    def __init__(self, hdf5_file, sample_rate=32000, clip_length=10, hop_size=15, augment=False, in_mem=False, extra_augment=False):
         """
         Reads the mp3 bytes from HDF file decodes using av and returns a fixed length audio wav
         """
@@ -89,7 +89,7 @@ class BatAudioDataset(TorchDataset):
             self.length = len(f['audio_name'])
             print(f"Dataset from {hdf5_file} with length {self.length}.")
         self.dataset_file = None  # lazy init
-        self.clip_length = clip_length * sample_rate
+        self.clip_length = (clip_length * sample_rate + 319) // 320 * hop_size
         self.augment = augment
         self.extra_augment = extra_augment
         if augment:
@@ -182,9 +182,9 @@ def get_roll_func(axis=1, shift=None, shift_range=50):
 
     return roll_func
 
-def get_training_set(train_hdf5, sample_rate=32000, clip_length=10, augment=False, in_mem=False, extra_augment=True, roll=True, wavmix=True):
+def get_training_set(train_hdf5, sample_rate=32000, clip_length=10, hop_size=15, augment=False, in_mem=False, extra_augment=True, roll=True, wavmix=True):
     ds = BatAudioDataset(
-        hdf5_file=train_hdf5, sample_rate=sample_rate, clip_length=clip_length, 
+        hdf5_file=train_hdf5, sample_rate=sample_rate, clip_length=clip_length, hop_size=hop_size, 
         augment=augment, in_mem=in_mem, extra_augment=extra_augment)
     if roll:
         ds = PreprocessDataset(ds, get_roll_func())
@@ -193,17 +193,17 @@ def get_training_set(train_hdf5, sample_rate=32000, clip_length=10, augment=Fals
     return ds
 
 
-def get_test_set(eval_hdf5, sample_rate=32000, clip_length=10):
+def get_test_set(eval_hdf5, sample_rate=32000, clip_length=10, hop_size=15):
     ds = BatAudioDataset(
         hdf5_file=eval_hdf5, sample_rate=sample_rate, 
-        clip_length=clip_length, 
+        clip_length=clip_length, hop_size=hop_size,
         augment=False, in_mem=False, extra_augment=False)
     return ds
 
-def get_validation_set(validation_hdf5, sample_rate=32000, classes_num=10, clip_length=10):
+def get_validation_set(validation_hdf5, sample_rate=32000, clip_length=10, hop_size=15):
     ds = BatAudioDataset(
         hdf5_file=validation_hdf5, sample_rate=sample_rate, 
-        clip_length=clip_length, 
+        clip_length=clip_length, hop_size=hop_size,
         augment=False, in_mem=False, extra_augment=False)
     return ds
 

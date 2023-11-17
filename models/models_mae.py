@@ -24,7 +24,7 @@ from utils.pos_embed import get_2d_sincos_pos_embed
 
 class AugmentMelSTFT(nn.Module):
     def __init__(self, n_mels=128, sr=32000, win_length=800, hopsize=320, n_fft=1024, freqm=48, timem=192,
-                 htk=False, fmin=0.0, fmax=None, norm=1, fmin_aug_range=1, fmax_aug_range=1000):
+                 htk=False, fmin=0.0, fmax=None, norm=1, fmin_aug_range=1, fmax_aug_range=1000, device='cuda'):
         torch.nn.Module.__init__(self)
         # adapted from: https://github.com/CPJKU/kagglebirds2020/commit/70f8308b39011b09d41eb0f4ace5aa7d2b0e806e
         # Similar config to the spectrograms used in AST: https://github.com/YuanGongND/ast
@@ -42,14 +42,14 @@ class AugmentMelSTFT(nn.Module):
         self.norm = norm
         self.hopsize = hopsize
         self.register_buffer('window',
-                             torch.hann_window(win_length, periodic=False),
+                             torch.hann_window(win_length, periodic=False).to(device),
                              persistent=False)
         assert fmin_aug_range >= 1, f"fmin_aug_range={fmin_aug_range} should be >=1; 1 means no augmentation"
         assert fmin_aug_range >= 1, f"fmax_aug_range={fmax_aug_range} should be >=1; 1 means no augmentation"
         self.fmin_aug_range = fmin_aug_range
         self.fmax_aug_range = fmax_aug_range
 
-        self.register_buffer("preemphasis_coefficient", torch.as_tensor([[[-.97, 1]]]), persistent=False)
+        self.register_buffer("preemphasis_coefficient", torch.as_tensor([[[-.97, 1]]]).to(device), persistent=False)
         if freqm == 0:
             self.freqm = torch.nn.Identity()
         else:
@@ -61,7 +61,6 @@ class AugmentMelSTFT(nn.Module):
 
 
     def forward(self, x):
-        print(x)
         x = nn.functional.conv1d(x.unsqueeze(1), self.preemphasis_coefficient).squeeze(1)
         x = torch.stft(x, self.n_fft, hop_length=self.hopsize, win_length=self.win_length,
                        center=True, normalized=False, window=self.window, return_complex=False)
@@ -105,16 +104,16 @@ class MaskedAutoencoderViT(nn.Module):
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False,
                  n_mels=128, sr=32000, win_length=800, hopsize=320, n_fft=1024, freqm=0, timem=0,
                  htk=False, fmin=0.0, fmax=None, norm=1, fmin_aug_range=10, fmax_aug_range=2000,
-                 norm_file='mean_std.npy'):
+                 norm_file='mean_std.npy', device='cuda'):
         super().__init__()
         # --------------------------------------------------------------------------
         # Mel Spectrogram
         self.mel = AugmentMelSTFT(
             n_mels=n_mels, sr=sr, win_length=win_length, hopsize=hopsize, n_fft=n_fft, freqm=freqm, timem=timem,
-            htk=htk, fmin=fmin, fmax=fmax, norm=norm, fmin_aug_range=fmin_aug_range, fmax_aug_range=fmax_aug_range)
+            htk=htk, fmin=fmin, fmax=fmax, norm=norm, fmin_aug_range=fmin_aug_range, fmax_aug_range=fmax_aug_range, device=device)
         mean_std_file = np.load(norm_file, allow_pickle=True).item()
-        self.frame_mean = torch.Tensor(mean_std_file['frame_mean']).cuda()
-        self.frame_std = torch.Tensor(mean_std_file['frame_std']).cuda()
+        self.frame_mean = torch.Tensor(mean_std_file['frame_mean']).to(device)
+        self.frame_std = torch.Tensor(mean_std_file['frame_std']).to(device)
         # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
@@ -148,14 +147,16 @@ class MaskedAutoencoderViT(nn.Module):
         # --------------------------------------------------------------------------
 
         self.norm_pix_loss = norm_pix_loss
+        self.device = device
 
         self.initialize_weights()
     
-    def mel_forward(self, x):
+    def mel_forward(self, x, normalize=True):
         old_shape = x.size()
         x = x.reshape(-1, old_shape[2])
         x = self.mel(x)
-        x = (x - self.frame_mean[None, :, None]) / self.frame_std[None, :, None]
+        if normalize:
+            x = (x - self.frame_mean[None, :, None]) / self.frame_std[None, :, None]
         x = x.reshape(old_shape[0], old_shape[1], x.shape[1], x.shape[2])
         return x
 
@@ -315,9 +316,9 @@ class MaskedAutoencoderViT(nn.Module):
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
 
-    def forward(self, imgs, mask_ratio=0.75):
-        imgs = imgs.type(torch.FloatTensor).cuda()
-        imgs = self.mel_forward(imgs)
+    def forward(self, imgs, mask_ratio=0.75, normalize=True):
+        imgs = imgs.type(torch.FloatTensor).to(self.device)
+        imgs = self.mel_forward(imgs, normalize=normalize)
         imgs = imgs[:, :, :self.patch_embed.img_size[0], :self.patch_embed.img_size[1]]
         latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
         pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p]
