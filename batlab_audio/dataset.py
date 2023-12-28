@@ -46,36 +46,36 @@ def pydub_augment(waveform, gain_augment=7):
     return waveform
 
 
-class MixupDataset(TorchDataset):
-    """ Mixing Up wave forms
-    """
+# class MixupDataset(TorchDataset):
+#     """ Mixing Up wave forms
+#     """
 
-    def __init__(self, dataset, beta=2, rate=0.5):
-        self.beta = beta
-        self.rate = rate
-        self.dataset = dataset
-        print(f"Mixing up waveforms from dataset of len {len(dataset)}")
+#     def __init__(self, dataset, beta=2, rate=0.5):
+#         self.beta = beta
+#         self.rate = rate
+#         self.dataset = dataset
+#         print(f"Mixing up waveforms from dataset of len {len(dataset)}")
 
-    def __getitem__(self, index):
-        if torch.rand(1) < self.rate:
-            x1 = self.dataset[index]
-            idx2 = torch.randint(len(self.dataset), (1,)).item()
-            x2 = self.dataset[idx2]
-            l = np.random.beta(self.beta, self.beta)
-            l = max(l, 1. - l)
-            x1 = x1-x1.mean()
-            x2 = x2-x2.mean()
-            x = (x1 * l + x2 * (1. - l))
-            x = x - x.mean()
-            return x
-        return self.dataset[index]
+#     def __getitem__(self, index):
+#         if torch.rand(1) < self.rate:
+#             x1 = self.dataset[index]
+#             idx2 = torch.randint(len(self.dataset), (1,)).item()
+#             x2, = self.dataset[idx2]
+#             l = np.random.beta(self.beta, self.beta)
+#             l = max(l, 1. - l)
+#             x1 = x1-x1.mean()
+#             x2 = x2-x2.mean()
+#             x = (x1 * l + x2 * (1. - l))
+#             x = x - x.mean()
+#             return x
+#         return self.dataset[index]
 
-    def __len__(self):
-        return len(self.dataset)
+#     def __len__(self):
+#         return len(self.dataset)
 
 
 class BatAudioDataset(TorchDataset):
-    def __init__(self, hdf5_file, sample_rate=32000, clip_length=10, hop_size=15, augment=False, in_mem=False, extra_augment=False):
+    def __init__(self, hdf5_file, sample_rate=32000, augment=False, in_mem=False, extra_augment=False):
         """
         Reads the mp3 bytes from HDF file decodes using av and returns a fixed length audio wav
         """
@@ -87,9 +87,10 @@ class BatAudioDataset(TorchDataset):
                 self.hdf5_file = io.BytesIO(f.read())
         with h5py.File(hdf5_file, 'r') as f:
             self.length = len(f['audio_name'])
+            self.clip_length = f['max_len'][0][0]
             print(f"Dataset from {hdf5_file} with length {self.length}.")
         self.dataset_file = None  # lazy init
-        self.clip_length = (clip_length * sample_rate + 319) // 320 * hop_size
+
         self.augment = augment
         self.extra_augment = extra_augment
         if augment:
@@ -113,23 +114,21 @@ class BatAudioDataset(TorchDataset):
           meta: {
             'hdf5_path': str,
             'index_in_hdf5': int}
-        Returns:
-          data_dict: {
-            'audio_name': str,
-            'waveform': (clip_samples,),
-            'target': (classes_num,)}
+        Returns: waveform (clip_samples,),
         """
         if self.dataset_file is None:
             self.open_hdf5()
 
-        audio_name = self.dataset_file['audio_name'][index].decode()
-        try:
-            waveform = decode_mp3(self.dataset_file['mp3'][index])
-        except:
-            print("Read Error:" + audio_name)
-            index = random.randint(1,self.length-1)
+        waveform = None
+        read_done = False
+        while not read_done:
             audio_name = self.dataset_file['audio_name'][index].decode()
-            waveform = decode_mp3(self.dataset_file['mp3'][index])
+            try:
+                waveform = decode_mp3(self.dataset_file['mp3'][index])
+                read_done = True
+            except:
+                print("Read Error:" + audio_name)
+                index = random.randint(1,self.length-1)
         #else:
         #    waveform = decode_mp3(self.dataset_file['mp3'][index])
         #waveform = decode_mp3(self.dataset_file['mp3'][index])
@@ -148,8 +147,10 @@ class BatAudioDataset(TorchDataset):
             waveform, _ = Transforms(waveform, self.sample_rate)
             if waveform.ndim > 1:
                 waveform = waveform[0, :]
+
+        wave_len = waveform.size
         waveform = pad_or_truncate(waveform, self.clip_length)
-        return waveform.reshape(1, -1)
+        return waveform.reshape(1, -1), wave_len
 
     def resample(self, waveform):
         """Resample.
@@ -171,47 +172,45 @@ def get_roll_func(axis=1, shift=None, shift_range=50):
     print("rolling...")
 
     def roll_func(b):
-        x = b
+        x, length = b
         x = torch.as_tensor(x)
         sf = shift
         if shift is None:
             sf = int(np.random.random_integers(-shift_range, shift_range))
         global FirstTime
 
-        return x.roll(sf, axis)
+        return x.roll(sf, axis), length
 
     return roll_func
 
-def get_training_set(train_hdf5, sample_rate=32000, clip_length=10, hop_size=15, augment=False, in_mem=False, extra_augment=True, roll=True, wavmix=True):
+def get_training_set(train_hdf5, sample_rate=32000, augment=False, in_mem=False, extra_augment=True, roll=True, wavmix=True):
     ds = BatAudioDataset(
-        hdf5_file=train_hdf5, sample_rate=sample_rate, clip_length=clip_length, hop_size=hop_size, 
+        hdf5_file=train_hdf5, sample_rate=sample_rate, 
         augment=augment, in_mem=in_mem, extra_augment=extra_augment)
     if roll:
         ds = PreprocessDataset(ds, get_roll_func())
-    if wavmix:
-        ds = MixupDataset(ds)
+    # if wavmix:
+    #     ds = MixupDataset(ds)
     return ds
 
 
-def get_test_set(eval_hdf5, sample_rate=32000, clip_length=10, hop_size=15):
+def get_test_set(eval_hdf5, sample_rate=32000):
     ds = BatAudioDataset(
         hdf5_file=eval_hdf5, sample_rate=sample_rate, 
-        clip_length=clip_length, hop_size=hop_size,
         augment=False, in_mem=False, extra_augment=False)
     return ds
 
-def get_validation_set(validation_hdf5, sample_rate=32000, clip_length=10, hop_size=15):
+def get_validation_set(validation_hdf5, sample_rate=32000):
     ds = BatAudioDataset(
         hdf5_file=validation_hdf5, sample_rate=sample_rate, 
-        clip_length=clip_length, hop_size=hop_size,
         augment=False, in_mem=False, extra_augment=False)
     return ds
 
 
 if __name__ == "__main__":
-    validation_hdf5 = './batlab_audio/data/batlab_data_test_mp3.hdf'
-    eval_hdf5 = './batlab_audio/data/batlab_data_eval_mp3.hdf'
-    train_hdf5 = './batlab_audio/data/batlab_data_train_mp3.hdf'
+    validation_hdf5 = './batlab_audio/single_chirp_data/batlab_data_test_mp3.hdf'
+    eval_hdf5 = './batlab_audio/single_chirp_data/batlab_data_eval_mp3.hdf'
+    train_hdf5 = './batlab_audio/single_chirp_data/batlab_data_train_mp3.hdf'
 
     print("get_test_set", len(get_test_set(eval_hdf5)))
     print("get_train_set", len(get_training_set(train_hdf5)))

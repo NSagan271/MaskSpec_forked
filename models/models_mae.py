@@ -104,8 +104,28 @@ class MaskedAutoencoderViT(nn.Module):
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False,
                  n_mels=128, sr=32000, win_length=800, hopsize=320, n_fft=1024, freqm=0, timem=0,
                  htk=False, fmin=0.0, fmax=None, norm=1, fmin_aug_range=10, fmax_aug_range=2000,
+                 mask_type='random', chunked_mask_mean_height=3, chunked_mask_mean_width=3,
+                 specgram_type='mel', adaptive_hopsize=False, train_decoder_only=False, train_last_layer_only=False,
                  norm_file='mean_std.npy', device='cuda'):
         super().__init__()
+
+        if mask_type != 'random':
+            print('WARNING (MaskedAutoEncoderViT): mask_type is being set to "random"---other types are not yet supported.')
+            mask_type = 'random'
+
+        if specgram_type not in ['mel', 'stft']:
+            specgram_type = 'mel'
+
+        self.specgram_type = specgram_type
+        self.adaptive_hopsize = adaptive_hopsize
+
+        self.mask_type = mask_type
+        self.chunked_mask_mean_height = chunked_mask_mean_height
+        self.chunked_mask_mean_width = chunked_mask_mean_width
+
+        assert not (train_decoder_only and train_last_layer_only), "At most one of {train_decoder_only, train_last_layer_only} can be set True."
+        no_encoder_grad = train_decoder_only or train_last_layer_only
+
         # --------------------------------------------------------------------------
         # Mel Spectrogram
         self.mel = AugmentMelSTFT(
@@ -119,20 +139,28 @@ class MaskedAutoencoderViT(nn.Module):
         # --------------------------------------------------------------------------
         # MAE encoder specifics
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
+        if no_encoder_grad:
+            self.patch_embed.requires_grad_(False)
         num_patches = self.patch_embed.num_patches
 
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim), requires_grad=(not no_encoder_grad))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim), requires_grad=False)  # fixed sin-cos embedding
 
         self.blocks = nn.ModuleList([
             Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
             for i in range(depth)])
+        if no_encoder_grad:
+            for block in self.blocks:
+                block.requires_grad_(False)
+
         self.norm = norm_layer(embed_dim)
         # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
         # MAE decoder specifics
         self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
+        if train_last_layer_only:
+            self.decoder_embed.requires_grad_(False)
 
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
 
@@ -141,6 +169,9 @@ class MaskedAutoencoderViT(nn.Module):
         self.decoder_blocks = nn.ModuleList([
             Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
             for i in range(decoder_depth)])
+        if train_last_layer_only:
+            for block in self.decoder_blocks:
+                block.requires_grad_(False)
 
         self.decoder_norm = norm_layer(decoder_embed_dim)
         self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size**2 * in_chans, bias=True) # decoder to patch
@@ -150,6 +181,32 @@ class MaskedAutoencoderViT(nn.Module):
         self.device = device
 
         self.initialize_weights()
+
+    def stft_forward(self, x, x_lens=None, scale=1.5):
+        hopsize = self.mel.hopsize
+
+        Sx = -scale*torch.ones(x.shape[0], 1, self.patch_embed.img_size[0], self.patch_embed.img_size[1])
+
+        # Each spectrogram may have a different hopsize, so we have to loop through
+        # the samples in the batch
+        for i in range(x.shape[0]):
+            if self.adaptive_hopsize:
+                # stft length is N // hopsize + 1
+                N = x_lens[i] if x_lens is not None else x.shape[1]
+                self.patch_embed.img_size[1]
+                hopsize = (N + self.patch_embed.img_size[1] - 2) // (self.patch_embed.img_size[1] - 1)
+            
+            Sxi = 20*torch.log10(torch.abs(torch.stft(x[i, 0, :], 256, hop_length=hopsize, win_length=256,
+                            return_complex=True, center=True, normalized=False, window=torch.hamming_window(256).to(x.device)) ** 2))
+            Sxi = Sxi[:, :self.patch_embed.img_size[1]]
+
+            # Normalize the spectrogram to fall within (-2, 2)
+            Sxi = torch.maximum(Sxi, torch.max(Sxi) - 100)
+            Sxi -= (torch.min(Sxi) + torch.max(Sxi))/2
+            Sxi = Sxi / torch.max(Sxi) * scale
+
+            Sx[i, 0, :, :Sxi.shape[1]] = Sxi[:-1, :]
+        return Sx.type(torch.HalfTensor).to(x.device)
     
     def mel_forward(self, x, normalize=True):
         old_shape = x.size()
@@ -221,6 +278,66 @@ class MaskedAutoencoderViT(nn.Module):
         x = torch.einsum('nhwpqc->nchpwq', x)
         imgs = x.reshape(shape=(x.shape[0], 1, h * p1, w * p2))
         return imgs
+    
+    def mask_chunks_high_snr(self, x, x_unpatched, mask_ratio=0.1):
+        def get_random_numbers():
+            start_xs = torch.argsort(torch.rand((W*H,), device=x.device)) % W
+            start_ys = torch.argsort(torch.rand((W*H,), device=x.device)) % H
+
+            heights = torch.ones(W*H, dtype=torch.int32, device=x.device)
+            heights.geometric_(1/avg_mask_height)
+            heights = torch.minimum(heights, H - start_ys)
+
+            widths = torch.ones(W*H, dtype=torch.int32, device=x.device)
+            widths.geometric_(1/avg_mask_width)
+            widths = torch.minimum(widths, W - start_xs)
+        
+            return start_xs, start_ys, widths, heights
+        
+        N = x.shape[0]
+        D = x.shape[-1]
+        H, W = self.patch_embed.grid_size
+
+        avg_mask_height = self.chunked_mask_mean_height
+        avg_mask_width = self.chunked_mask_mean_width
+
+        n_masked = int(round(H*W*mask_ratio))
+        ids_mask = torch.zeros(N, n_masked, dtype=torch.int32, device=x.device)
+        ids_keep = torch.zeros(N, H*W-n_masked, dtype=torch.int32, device=x.device)
+        masks = torch.ones(N, W*H, device=x.device)
+
+        i = 0
+        for k in range(N):
+            mask = torch.ones(H, W, device=x.device)
+            cur_mask_ratio = 0
+            cutoff_coeff = 0.8
+            cutoff = torch.min(x_unpatched) + (torch.max(x_unpatched) - torch.min(x_unpatched)) * cutoff_coeff
+        
+            start_xs, start_ys, widths, heights = get_random_numbers()
+
+            while cur_mask_ratio <= mask_ratio:
+                block = x_unpatched[k, 0, 16*start_ys[i]:16*(start_ys[i]+heights[i]), 16*start_xs[i]:16*(start_xs[i]+widths[i])]
+                if torch.amax(block, (0,1)) >= cutoff:
+                    mask[start_ys[i]:start_ys[i]+heights[i], start_xs[i]:start_xs[i]+widths[i]] = 0
+                cur_mask_ratio = torch.sum(1 - mask) / (W*H)
+                i += 1
+                if i >= W*H:
+                    cutoff_coeff *= 0.75
+                    cutoff = torch.min(x_unpatched) + (torch.max(x_unpatched) - torch.min(x_unpatched)) * cutoff_coeff
+                    i = 0
+                    start_xs, start_ys, widths, heights = get_random_numbers()
+
+            
+            mask = mask.reshape(W*H)
+            ids_mask[k, :] = torch.nonzero(1-mask, as_tuple=True)[0][:n_masked]
+            masks[k, ids_mask[k, :]] = 0
+            ids_keep[k, :] = torch.nonzero(masks[k, :], as_tuple=True)[0]
+
+        ids_restore = torch.argsort(torch.cat((ids_keep, ids_mask), dim=1), dim=1)
+
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D).type(torch.LongTensor).to(x.device))        
+
+        return x_masked, mask, ids_restore
 
     def random_masking(self, x, mask_ratio):
         """
@@ -248,6 +365,58 @@ class MaskedAutoencoderViT(nn.Module):
         mask = torch.gather(mask, dim=1, index=ids_restore)
 
         return x_masked, mask, ids_restore
+    
+    def random_masking_block_size(self, x, mask_ratio, block_size=1):
+        N, L, D = x.shape  # batch, length, dim
+        H, W = self.patch_embed.grid_size
+
+        W_rounded_up = (W + block_size - 1) // block_size * block_size
+        H_rounded_down = H // block_size * block_size
+
+        # rearrange the indices to group each block_size x block_size chunk
+        # of patches, and only mask indices that fall into a full block
+        idxs = torch.arange(H_rounded_down * W_rounded_up, dtype=torch.int64, device=x.device)
+        block_num = idxs // (block_size ** 2)
+        block_position = idxs % (block_size ** 2)
+
+        row = block_size * (block_num // (W // block_size)) + block_position // block_size
+        col = block_size * (block_num % (W // block_size)) + block_position % block_size
+        rearranged_idxs = (row * W + col)[0:(W // block_size) * block_size * H_rounded_down]
+        num_blocked_idxs = rearranged_idxs.shape[0]
+
+        len_keep = int(num_blocked_idxs * (1 - mask_ratio)) + (H*W - num_blocked_idxs)
+        rearranged_idxs = rearranged_idxs.reshape(rearranged_idxs.shape[0] // (block_size ** 2), block_size ** 2)
+
+        noise = torch.rand(N, rearranged_idxs.shape[0], device=x.device)
+        ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
+        ids_shuffle = ids_shuffle.unsqueeze(-1).repeat(1, 1, block_size ** 2)
+
+        ids_block_shuffle = torch.gather(rearranged_idxs.unsqueeze(0).repeat(N, 1, 1), 1, ids_shuffle).reshape(-1, num_blocked_idxs)
+
+        unblocked_idxs = torch.zeros(H*W - num_blocked_idxs, dtype=torch.int64, device=x.device)
+
+        if W % block_size:
+            unblocked_idxs[0:(W%block_size)*H_rounded_down] = torch.arange(H_rounded_down*W).reshape(H_rounded_down, W)[:, -(W%block_size):].flatten()
+        if H % block_size:
+            unblocked_idxs[(W%block_size)*H_rounded_down:] = torch.arange(H*W).reshape(H, W)[H_rounded_down:, :].flatten()
+
+        ids_block_shuffle = torch.cat((unblocked_idxs.unsqueeze(0).repeat(N, 1), ids_block_shuffle), dim=1)
+        
+        # now the rest is the same as in random_masking![]
+        ids_restore = torch.argsort(ids_block_shuffle, dim=1)
+
+        # keep the first subset
+        ids_keep = ids_block_shuffle[:, :len_keep]
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+
+        # generate the binary mask: 0 is keep, 1 is remove
+        mask = torch.ones([N, L], device=x.device)
+        mask[:, :len_keep] = 0
+        # unshuffle to get the binary mask
+        mask = torch.gather(mask, dim=1, index=ids_restore)
+
+        return x_masked, mask, ids_restore
+
 
     def forward_encoder(self, x, mask_ratio):
         # embed patches
@@ -257,6 +426,7 @@ class MaskedAutoencoderViT(nn.Module):
         x = x + self.pos_embed[:, 1:, :]
 
         # masking: length -> length * mask_ratio
+        # mask_block_size = int(torch.rand(1).item() * 4 // 1) + 1
         x, mask, ids_restore = self.random_masking(x, mask_ratio)
 
         # append cls token
@@ -316,9 +486,14 @@ class MaskedAutoencoderViT(nn.Module):
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
 
-    def forward(self, imgs, mask_ratio=0.75, normalize=True):
-        imgs = imgs.type(torch.FloatTensor).to(self.device)
-        imgs = self.mel_forward(imgs, normalize=normalize)
+    def forward(self, imgs, lengths=None, mask_ratio=0.75, normalize=True):
+        imgs = imgs.to(self.device)
+
+        if self.specgram_type == 'mel':
+            imgs = self.mel_forward(imgs, normalize=normalize)
+        else:
+            imgs = self.stft_forward(imgs, lengths)
+            
         imgs = imgs[:, :, :self.patch_embed.img_size[0], :self.patch_embed.img_size[1]]
         latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
         pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p]

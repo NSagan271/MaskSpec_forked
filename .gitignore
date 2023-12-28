@@ -2,7 +2,7 @@
 __pycache__
 mspec_env/
 data/
-single_mic_data/
+single_mic_data*/
 output*/
 log*/
 *.npy

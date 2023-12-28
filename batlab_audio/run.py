@@ -46,6 +46,12 @@ def get_args_parser():
 
     parser.add_argument('--drop_path', type=float, default=0.1, metavar='PCT',
                         help='Drop path rate (default: 0.1)')
+    
+    parser.add_argument('--train_decoder_only', action='store_true', default=False,
+                        help='Instead of training the full model, only train the decoder half')
+    
+    parser.add_argument('--train_last_layer_only', action='store_true', default=False,
+                        help='Instead of training the full model, only train the last layer (after the decoder)')
 
     # Optimizer parameters
     parser.add_argument('--clip_grad', type=float, default=None, metavar='NORM',
@@ -83,21 +89,27 @@ def get_args_parser():
                         help='Random erase count (default: 1)')
     parser.add_argument('--resplit', action='store_true', default=False,
                         help='Do not random erase first (clean) augmentation split')
-
-    parser.add_argument('--mask_ratio', default=0.8, type=float,
+    
+    parser.add_argument('--mask_ratio', default=0.1, type=float,
                         help='Masking ratio (percentage of removed patches).')
+    parser.add_argument('--mask_type', default='random', choices=['random', 'chunked'],
+                        help='Whether to mask random patches, chunks of patches, or the block of time [T, end], where T is random.')
+    parser.add_argument('--avg_chunk_height', default=2, type=float,
+                        help='If using chunked masking, average height (in patches) of a chunk')
+    parser.add_argument('--avg_chunk_width', default=4, type=float,
+                        help='If using chunked masking, average width (in patches) of a chunk')
 
     # Dataset parameters
-    parser.add_argument('--data_path_train', default='./batlab_audio/data/batlab_data_train_mp3.hdf', type=str,
+    parser.add_argument('--data_path_train', default='./batlab_audio/single_chirp_data/batlab_data_train_mp3.hdf', type=str,
                         help='train dataset path')
-    parser.add_argument('--data_path_val', default='./batlab_audio/data/batlab_data_eval_mp3.hdf', type=str,
+    parser.add_argument('--data_path_val', default='./batlab_audio/single_chirp_data/batlab_data_eval_mp3.hdf', type=str,
                         help='validation dataset path')
-    parser.add_argument('--data_path_test', default='./batlab_audio/data/batlab_data_test_mp3.hdf', type=str,
+    parser.add_argument('--data_path_test', default='./batlab_audio/single_chirp_data/batlab_data_test_mp3.hdf', type=str,
                         help='test dataset path')
     parser.add_argument('--norm_file', default='./batlab_audio/mean_std_128.npy', type=str,
                         help='norm file path')
     parser.add_argument('--sample_rate', default=32000, type=int)
-    parser.add_argument('--hop_size', default=15, type=int)
+    parser.add_argument('--hop_size', default=10, type=int)
     parser.add_argument('--clip_length', default=10, type=int)
     parser.add_argument('--augment', default=True, type=bool)
     parser.add_argument('--in_mem', default=False, type=bool)
@@ -180,22 +192,18 @@ def main(args):
     dataset_train = get_training_set(
         train_hdf5=args.data_path_train, 
         sample_rate=args.sample_rate, 
-        clip_length=args.clip_length, 
         augment=args.augment, 
         in_mem=args.in_mem, 
         extra_augment=args.extra_augment, 
         roll=args.roll,
-        wavmix=args.wavmix,
-        hop_size=args.hop_size)
+        wavmix=args.wavmix)
     sampler_train = torch.utils.data.DistributedSampler(
         dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
     )
     print("Sampler_train = %s" % str(sampler_train))
     dataset_test = get_test_set(
         eval_hdf5=args.data_path_test, 
-        sample_rate=args.sample_rate, 
-        clip_length=args.clip_length,
-        hop_size=args.hop_size)
+        sample_rate=args.sample_rate)
     if args.dist_eval:
         if len(dataset_test) % num_tasks != 0:
             print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
@@ -208,9 +216,7 @@ def main(args):
     print("Sampler_test = %s" % str(sampler_test))
     dataset_val = get_validation_set(
         validation_hdf5=args.data_path_val, 
-        sample_rate=args.sample_rate, 
-        clip_length=args.clip_length,
-        hop_size=args.hop_size)
+        sample_rate=args.sample_rate)
     if args.dist_eval:
         if len(dataset_val) % num_tasks != 0:
             print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
@@ -254,8 +260,15 @@ def main(args):
     model = models_mae.__dict__[args.model](
         norm_pix_loss=False,
         norm_file=args.norm_file,
-        hopsize=15,
-        device=device
+        hopsize=args.hop_size,
+        device=device,
+        mask_type=args.mask_type,
+        specgram_type='stft',
+        adaptive_hopsize=True,
+        chunked_mask_mean_height=args.avg_chunk_height,
+        chunked_mask_mean_width=args.avg_chunk_width,
+        train_decoder_only=args.train_decoder_only,
+        train_last_layer_only=args.train_last_layer_only
     )
     checkpoint = torch.load(args.resume, map_location='cpu')
     model.load_state_dict(checkpoint['model'])
@@ -300,7 +313,7 @@ def main(args):
     print("criterion = %s" % str(criterion))
 
     if args.eval:
-        test_stats = evaluate(data_loader_test, model, device)
+        test_stats = evaluate(data_loader_test, model, device, mask_ratio=args.mask_ratio)
         print(f"Loss of the network on the {len(dataset_test)} test images: {test_stats['loss']:.1f}")
         exit(0)
 
@@ -322,12 +335,12 @@ def main(args):
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)
 
-        val_stats = evaluate(data_loader_val, model, device)
+        val_stats = evaluate(data_loader_val, model, device, mask_ratio=args.mask_ratio)
         # print(f"Loss of the network on the {len(dataset_val)} val images: {val_stats['loss']:.1f}")
         min_loss_val = min(min_loss_val, val_stats["loss"])
         print(f'Min loss Val: {min_loss_val:.4f}')
 
-        test_stats = evaluate(data_loader_test, model, device)
+        test_stats = evaluate(data_loader_test, model, device, mask_ratio=args.mask_ratio)
         # print(f"Loss of the network on the {len(dataset_test)} test images: {test_stats['loss']:.1f}")
         min_loss_test = min(min_loss_test, test_stats["loss"])
         print(f'Min loss Test: {min_loss_test:.4f}')

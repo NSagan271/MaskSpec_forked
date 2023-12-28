@@ -26,7 +26,7 @@ def train_one_epoch(model: torch.nn.Module,
     if log_writer is not None:
         print('log_dir: {}'.format(log_writer.log_dir))
 
-    for data_iter_step, samples in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for data_iter_step, (samples, lengths) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
@@ -35,7 +35,7 @@ def train_one_epoch(model: torch.nn.Module,
         samples = samples.to(device, non_blocking=True)
 
         with torch.cuda.amp.autocast():
-            loss, _, _ = model(samples, mask_ratio=args.mask_ratio)
+            loss, _, _ = model(samples, lengths, mask_ratio=args.mask_ratio)
 
         loss_value = loss.item()
 
@@ -80,12 +80,12 @@ def evaluate(data_loader, model, device, mask_ratio=0.75):
 
     # switch to evaluation mode
     model.eval()
-    for images in metric_logger.log_every(data_loader, 100, header):
+    for images, lengths in metric_logger.log_every(data_loader, 20, header):
         images = images.to(device, non_blocking=True)
 
         # compute output
         with torch.cuda.amp.autocast():
-            loss, _, _ = model(images, mask_ratio=mask_ratio)
+            loss, _, _ = model(images, lengths, mask_ratio=mask_ratio)
         
         metric_logger.update(loss=loss.item())
     metric_logger.synchronize_between_processes()

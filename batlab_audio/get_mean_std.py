@@ -7,15 +7,15 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from scv2.dataset import decode_mp3, pad_or_truncate
 from models.models_mae import AugmentMelSTFT 
 
-def get_mean_std(n_mel=128, sample_number=10000, hopsize=15):
+def get_mean_std(n_mel=128, sample_number=10000, hopsize=10):
     print('Start...')
-    hdf5_file = './batlab_audio/data/batlab_data_train_mp3.hdf'
+    hdf5_file = './batlab_audio/single_mic_data/batlab_data_train_mp3.hdf'
     dataset = h5py.File(hdf5_file, 'r')
     length = len(dataset['audio_name'])
     Mel = AugmentMelSTFT(
         n_mels=n_mel, sr=32000, win_length=800, hopsize=hopsize, n_fft=1024, freqm=0,
         timem=0, htk=False, fmin=0.0, fmax=None, norm=1, fmin_aug_range=10,
-        fmax_aug_range=2000)
+        fmax_aug_range=2000, device='cpu')
     all_mean = 0.
     all_std = 0.
     count = 0
